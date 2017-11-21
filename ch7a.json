@@ -1,0 +1,7 @@
+{
+  "vy_climb_speed": 60,
+  "cruise_climb_speed": 70,
+  "climb_fuel_burn": 8,
+  "cruise_fuel_burn": 6,
+  "performance_chart": "perf.chart"
+}

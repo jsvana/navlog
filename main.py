@@ -5,6 +5,7 @@ from collections import (
     namedtuple,
 )
 import datetime
+import json
 import math
 from pathlib import Path
 import re
@@ -102,14 +103,9 @@ def parse_args():
         help='Destination of flight',
     )
     route_parser.add_argument(
-        'vy_climb_speed',
-        type=int,
-        help='Vy climb speed in kts',
-    )
-    route_parser.add_argument(
-        'cruise_climb_speed',
-        type=int,
-        help='Cruise climb speed in kts',
+        'performance_profile',
+        type=Path,
+        help='Path to performance profile file',
     )
     route_parser.add_argument(
         'cruise_speed',
@@ -117,18 +113,13 @@ def parse_args():
         help='Cruise speed in kts',
     )
     route_parser.add_argument(
-        'climb_fuel_burn',
-        type=int,
-        help='Climb fuel burn in gph',
-    )
-    route_parser.add_argument(
-        'cruise_fuel_burn',
-        type=int,
-        help='Cruise fuel burn in gph',
-    )
-    route_parser.add_argument(
         'departure_time',
         help='Time of departure',
+    )
+    # TODO: calculate this automatically
+    route_parser.add_argument(
+        'winds_airport',
+        help='Airport to get winds aloft data from',
     )
     route_parser.add_argument(
         'route',
@@ -475,18 +466,64 @@ RoutePart = namedtuple(
 )
 
 
+class Winds:
+
+    def __init__(self, true_course, wind_correction_angle):
+        self.true_course = true_course
+        self.wind_correction_angle = wind_correction_angle
+        self.declination = None
+        self.compass_correction = 0
+
+    @property
+    def compass_heading(self):
+        if self.declination is None:
+            raise ValueError('Must have declination set')
+        return self.true_course + self.wind_correction_angle + self.declination
+
+
+def calculate_winds(bearing, speed, altitude, winds_aloft):
+    low, hi = bounding_fields(altitude, winds_aloft.keys())
+    if altitude - low < altitude - hi:
+        choice = low
+    else:
+        choice = hi
+    winds = winds_aloft[choice]
+    wind_angle = math.radians(bearing - winds['direction'])
+    speed_component = -math.sin(wind_angle) * winds['velocity']
+    crosswind_correction = math.degrees(
+        math.asin(
+            winds['velocity'] * math.sin(wind_angle) / speed
+        )
+    )
+    opposite_direction = bearing - 180
+    wind_dir = winds['direction']
+    if wind_dir < bearing and wind_dir > opposite_direction:
+        crosswind_correction = -crosswind_correction
+    groundspeed = speed - speed_component
+    return groundspeed, winds, Winds(bearing, crosswind_correction)
+
+
+def format_winds(winds):
+    ret = 'dir {} vel {}'.format(winds['direction'], winds['velocity'])
+    if 'temperature' in winds:
+        ret += ' temp {}'.format(winds['temperature'])
+    return ret
+
+
 def cmd_route(args):
-    # TODO: read perf information from json file
-    # departure_time = parse_time(args.departure_time)
+    departure_time = parse_time(args.departure_time)
 
-    # try:
-        # offset = offset_from_time(departure_time)
-    # except ValueError as e:
-        # print(str(e))
-        # return False
+    try:
+        offset = offset_from_time(departure_time)
+    except ValueError as e:
+        print(str(e))
+        return False
 
-    # winds = get_all_winds(offset)
-    # print(winds)
+    _, winds = get_all_winds(offset)
+    winds_aloft = winds[args.winds_airport]
+
+    with args.performance_profile.open('r') as f:
+        perf_data = json.load(f)
 
     stops = [Stop(args.departure.upper(), altitude=0, speed=0)]
     stops.extend([parse_stop(stop.upper()) for stop in args.route])
@@ -502,7 +539,7 @@ def cmd_route(args):
             continue
 
         if stop.location not in airports:
-            print('unknown stop {}'.format(stop.location), file=sys.stderr)
+            print('unknown stop {}'.format(stop.location))
             continue
 
         data = airports[stop.location]
@@ -518,7 +555,6 @@ def cmd_route(args):
             rows,
             headers=['location', 'altitude', 'speed'],
         ),
-        file=sys.stderr,
     )
 
     parts = []
@@ -550,39 +586,70 @@ def cmd_route(args):
         else:
             if attitude == 'climb':
                 if prev.altitude == 0:
-                    speed = args.vy_climb_speed
+                    speed = perf_data['vy_climb_speed']
                 else:
-                    speed = args.cruise_climb_speed
+                    speed = perf_data['cruise_climb_speed']
             else:
                 speed = args.cruise_speed
+
+        groundspeed, selected_winds, part_winds = calculate_winds(
+            bearing,
+            speed,
+            cur.altitude,
+            winds_aloft,
+        )
+
+        part_winds.declination = declination(
+            abs(cur.latitude - prev.latitude) / 2,
+            abs(cur.longitude - prev.longitude) / 2,
+        )
+
+        ete = distance / groundspeed
+        if attitude == 'climb':
+            fuel = ete * perf_data['climb_fuel_burn']
+        else:
+            fuel = ete * perf_data['cruise_fuel_burn']
 
         parts.append(
             RoutePart(
                 cur.altitude,
                 attitude,
-                None,
+                selected_winds,
                 speed,
-                bearing,  # TODO: calculate magnetic heading
+                part_winds.compass_heading,
                 distance,
-                None,  # TODO: calculate groundspeed
-                None,  # TODO: calculate ETE
-                None,  # TODO: calculate fuel
+                groundspeed,
+                ete,
+                fuel,
             ),
         )
         rows.append([
             cur.altitude,
             attitude,
+            format_winds(selected_winds),
             speed,
-            bearing,
-            distance,
+            round(part_winds.compass_heading),
+            math.ceil(distance),
+            math.ceil(groundspeed),
+            math.ceil(ete * 60),
+            math.ceil(fuel),
         ])
 
     print(
         tabulate(
             rows,
-            headers=['altitude', 'attitude', 'tas', 'bearing', 'distance'],
+            headers=[
+                'altitude',
+                'attitude',
+                'winds',
+                'tas',
+                'compass_heading',
+                'distance',
+                'groundspeed',
+                'ete',
+                'fuel',
+            ],
         ),
-        file=sys.stderr,
     )
 
     return True
