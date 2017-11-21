@@ -565,15 +565,9 @@ def cmd_route(args):
             stop.altitude,
             stop.speed,
         ])
-    print(
-        tabulate(
-            rows,
-            headers=['location', 'altitude', 'speed'],
-        ),
-    )
 
     parts = []
-    rows = []
+    stop_rows = []
     for i in range(1, len(stops)):
         prev = stops[i - 1]
         cur = stops[i]
@@ -648,22 +642,56 @@ def cmd_route(args):
                 fuel,
             ),
         )
-        rows.append([
+        stop_rows.append([
+            prev.location,
+            '',
+            '',
+            '',
+            '',
+            '',
+            '',
+            '',
+            '',
+            '',
+        ])
+        stop_rows.append([
+            '├───────',
             cur.altitude,
             attitude,
             format_winds(selected_winds),
-            speed,
-            round(part_winds.compass_heading),
-            math.ceil(distance),
-            math.ceil(groundspeed),
-            math.ceil(ete * 60),
-            math.ceil(fuel),
+            '{}kts'.format(speed),
+            '{}deg'.format(round(part_winds.compass_heading)),
+            '{}nm'.format(math.ceil(distance)),
+            '{}kts'.format(math.ceil(groundspeed)),
+            '{}min'.format(math.ceil(ete * 60)),
+            '{}gal'.format(math.ceil(fuel)),
         ])
+
+    stop_rows.append([
+        stops[-1].location,
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+    ])
+
+    if len(stops) != len(parts) + 1:
+        print(
+            'Bad route calculation, expected one more stop than parts but got '
+            '{} stops and {} parts'.format(len(stops), len(parts)),
+        )
+        return False
 
     print(
         tabulate(
-            rows,
+            stop_rows,
             headers=[
+                'location',
                 'altitude',
                 'attitude',
                 'winds',
