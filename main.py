@@ -696,7 +696,7 @@ def get_waypoint(waypoint):
 
 
 def get_airports():
-    path = Path.home() / 'Downloads/NfdcFacilities.xls'
+    path = Path('NfdcFacilities.xls')
     with path.open('r') as f:
         lines = f.readlines()
 
