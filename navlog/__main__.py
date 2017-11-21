@@ -14,9 +14,13 @@ from xml.etree import ElementTree
 
 
 from bs4 import BeautifulSoup
+import psycopg2
 import pytz
 import requests
 from tabulate import tabulate
+
+
+from . import config
 
 
 def parse_args():
@@ -525,6 +529,31 @@ def temperature_from_metar(station):
     return int(temperature_str)
 
 
+def nearest_winds_aloft(airport_keys, latitude, longitude):
+    sql = (
+        "SELECT ST_Distance(ST_GeogFromText(%s), point) "
+        'AS distance, icao_identifier FROM airports_airport '
+        'WHERE icao_identifier IN ({}) ORDER BY distance ASC LIMIT 1'
+        .format(', '.join(['%s'] * len(airport_keys)))
+    )
+    conn = psycopg2.connect(
+        host=config.postgres['host'],
+        port=config.postgres['port'],
+        database=config.postgres['database'],
+        user=config.postgres['username'],
+        password=config.postgres['password'],
+    )
+    cur = conn.cursor()
+    cur.execute(
+        sql,
+        ['POINT({} {})'.format(longitude, latitude)] + airport_keys,
+    )
+    # Strip the 'K' prefix
+    key = cur.fetchone()[1][1:]
+    conn.close()
+    return key
+
+
 def cmd_route(args):
     departure_time = parse_time(args.departure_time)
 
@@ -535,7 +564,6 @@ def cmd_route(args):
         return False
 
     _, winds = get_all_winds(offset)
-    winds_aloft = winds[args.winds_airport]
 
     with args.performance_profile.open('r') as f:
         perf_data = json.load(f)
@@ -566,6 +594,8 @@ def cmd_route(args):
             stop.speed,
         ])
 
+    total_distance = 0
+    total_fuel = 0
     parts = []
     stop_rows = []
     for i in range(1, len(stops)):
@@ -601,11 +631,17 @@ def cmd_route(args):
             else:
                 speed = args.cruise_speed
 
+        winds_aloft_airport = nearest_winds_aloft(
+            ['K{}'.format(k) for k in winds],
+            stop.latitude,
+            stop.longitude,
+        )
+
         groundspeed, selected_winds, part_winds = calculate_winds(
             bearing,
             speed,
             cur.altitude,
-            winds_aloft,
+            winds[winds_aloft_airport],
         )
 
         if 'temperature' not in selected_winds:
@@ -628,6 +664,9 @@ def cmd_route(args):
             fuel = ete * perf_data['climb_fuel_burn']
         else:
             fuel = ete * perf_data['cruise_fuel_burn']
+
+        total_distance += distance
+        total_fuel += fuel
 
         parts.append(
             RoutePart(
@@ -702,6 +741,13 @@ def cmd_route(args):
                 'ete',
                 'fuel',
             ],
+        ),
+    )
+
+    print(
+        'total distance: {}nm, total fuel: {}gal'.format(
+            math.ceil(total_distance),
+            math.ceil(total_fuel),
         ),
     )
 

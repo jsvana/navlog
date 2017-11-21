@@ -1,0 +1,7 @@
+postgres = {
+    'host': 'my_cool_hostname',
+    'port': 12345,
+    'username': 'fake_user',
+    'password': 'fake_password',
+    'database': 'fake_faa_database',
+}
