@@ -89,6 +89,59 @@ def parse_args():
     )
     declination_parser.set_defaults(cmd=cmd_declination)
 
+    route_parser = subparsers.add_parser(
+        'route',
+        help='Build a navlog for a given route',
+    )
+    route_parser.add_argument(
+        'departure',
+        help='Departure point of flight',
+    )
+    route_parser.add_argument(
+        'destination',
+        help='Destination of flight',
+    )
+    route_parser.add_argument(
+        'vy_climb_speed',
+        type=int,
+        help='Vy climb speed in kts',
+    )
+    route_parser.add_argument(
+        'cruise_climb_speed',
+        type=int,
+        help='Cruise climb speed in kts',
+    )
+    route_parser.add_argument(
+        'climb_fuel_burn',
+        type=int,
+        help='Climb fuel burn in gph',
+    )
+    route_parser.add_argument(
+        'cruise_fuel_burn',
+        type=int,
+        help='Cruise fuel burn in gph',
+    )
+    route_parser.add_argument(
+        'departure_time',
+        help='Time of departure',
+    )
+    route_parser.add_argument(
+        'route',
+        nargs='*',
+        help='Route of flight',
+    )
+    route_parser.set_defaults(cmd=cmd_route)
+
+    airport_parser = subparsers.add_parser(
+        'airport-info',
+        help='Build a navlog for a given airport',
+    )
+    airport_parser.add_argument(
+        'airport',
+        help='Airport code to get information for',
+    )
+    airport_parser.set_defaults(cmd=cmd_airport_info)
+
     return parser.parse_args()
 
 
@@ -289,11 +342,15 @@ def offset_from_time(time):
         return 6
 
 
-def cmd_winds(args):
-    winds_time = datetime.datetime.strptime(
-        args.time,
+def parse_time(time):
+    return datetime.datetime.strptime(
+        time,
         '%Y-%m-%d %H%M%Z',
     ).astimezone(pytz.timezone('UTC'))
+
+
+def cmd_winds(args):
+    winds_time = parse_time(args.time)
 
     try:
         offset = offset_from_time(winds_time)
@@ -335,18 +392,141 @@ def cmd_winds(args):
     return True
 
 
-def cmd_declination(args):
+def declination(latitude, longitude):
     URL = (
         'http://www.ngdc.noaa.gov/geomag-web/calculators/calculateDeclination'
     )
     params = {
-        'lat1': args.latitude,
-        'lon1': args.longitude,
+        'lat1': latitude,
+        'lon1': longitude,
         'resultFormat': 'xml',
         'startMonth': datetime.datetime.now().month,
     }
     tree = ElementTree.fromstring(requests.get(URL, params=params).text)
-    print(float(tree.find('result/declination').text))
+    return float(tree.find('result/declination').text)
+
+
+def cmd_declination(args):
+    print(declination(args.latitude, args.longitude))
+
+    return True
+
+
+Stop = namedtuple('Stop', ['location', 'altitude', 'speed'])
+
+
+def parse_stop(stop):
+    if '/' not in stop:
+        return Stop(location=stop)
+
+    parts = stop.split('/', 1)
+
+    altitude = None
+    speed = None
+    m = re.search(r'A(\d+)', stop)
+    if m:
+        altitude = int(m.groups()[0])
+    m = re.search(r'N(\d+)', stop)
+    if m:
+        speed = int(m.groups()[0])
+    return Stop(parts[0], altitude, speed)
+
+
+RoutePart = namedtuple(
+    'RoutePart',
+    [
+        'altitude',
+        'attitude',
+        'wind',
+        'true_airspeed',
+        'compass_heading',
+        'distance',
+        'groundspeed',
+        'estimated_time_enroute',
+        'fuel',
+    ],
+)
+
+
+def cmd_route(args):
+    departure_time = parse_time(args.departure_time)
+
+    try:
+        offset = offset_from_time(departure_time)
+    except ValueError as e:
+        print(str(e))
+        return False
+
+    winds = get_all_winds(offset)
+    print(winds)
+
+    stops = [Stop(args.departure.upper(), altitude=0, speed=0)]
+    stops.extend([parse_stop(stop.upper()) for stop in args.route])
+    stops.append(Stop(args.destination.upper(), altitude=0, speed=0))
+
+    print(stops)
+
+    return True
+
+
+def get_airports():
+    path = Path.home() / 'Downloads/NfdcFacilities.xls'
+    with path.open('r') as f:
+        lines = f.readlines()
+
+    headers = [h.replace('"', '') for h in lines[0].strip().split('\t')]
+    airports = {}
+    for line in lines[1:]:
+        data = dict(zip(headers, line.strip().split('\t')))
+        if 'IcaoIdentifier' not in data:
+            continue
+        data['latitude'] = float(data['ARPLatitudeS'][:-1]) / 3600
+        if data['ARPLatitudeS'][-1] == 'S':
+            data['latitude'] = -data['latitude']
+        data['longitude'] = float(data['ARPLongitudeS'][:-1]) / 3600
+        if data['ARPLongitudeS'][-1] == 'W':
+            data['longitude'] = -data['longitude']
+        airports[data['IcaoIdentifier']] = data
+
+    return airports
+
+
+def distance_between_points(lat1, lon1, lat2, lon2):
+    EARTH_RADIUS = 3440
+    lat1_rad = math.radians(lat1)
+    lat2_rad = math.radians(lat2)
+    d_lat = math.radians(lat2 - lat1)
+    d_lon = math.radians(lon2 - lon1)
+    a = (
+        math.sin(d_lat / 2) ** 2 +
+        math.cos(lat1_rad) * math.cos(lat2_rad) *
+        math.sin(d_lon / 2) ** 2
+    )
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return EARTH_RADIUS * c
+
+
+def bearing_between_points(lat1, lon1, lat2, lon2):
+    bearing = math.atan2(
+        math.sin(lon2 - lon1) * math.cos(lat2),
+        (
+            math.cos(lat1) * math.sin(lat2) - math.sin(lat1)
+            * math.cos(lat2) * math.cos(lon2 - lon1)
+        ),
+    )
+    bearing = math.degrees(bearing)
+    return (bearing + 360) % 360
+
+
+def cmd_airport_info(args):
+    airports = get_airports()
+    # print(airports[args.airport.upper()])
+
+    pao = airports['KPAO']
+    oak = airports['KOAK']
+
+    print(distance_between_points(pao['latitude'], pao['longitude'], oak['latitude'], oak['longitude']))
+    print(bearing_between_points(pao['latitude'], pao['longitude'], oak['latitude'], oak['longitude']))
 
     return True
 
