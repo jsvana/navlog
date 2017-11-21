@@ -112,6 +112,11 @@ def parse_args():
         help='Cruise climb speed in kts',
     )
     route_parser.add_argument(
+        'cruise_speed',
+        type=int,
+        help='Cruise speed in kts',
+    )
+    route_parser.add_argument(
         'climb_fuel_burn',
         type=int,
         help='Climb fuel burn in gph',
@@ -412,7 +417,29 @@ def cmd_declination(args):
     return True
 
 
-Stop = namedtuple('Stop', ['location', 'altitude', 'speed'])
+Stop = namedtuple(
+    'Stop',
+    ['location', 'altitude', 'speed', 'latitude', 'longitude'],
+)
+
+
+class Stop:
+
+    def __init__(self, location, altitude, speed):
+        self.location = location
+        self.altitude = altitude
+        self.speed = speed
+
+    def __str__(self):
+        ret = 'location {} altitude {} speed {}'.format(
+            self.location,
+            self.altitude,
+            self.speed,
+        )
+        for prop in ['latitude', 'longitude']:
+            if hasattr(self, prop):
+                ret += ' {} {}'.format(prop, getattr(self, prop))
+        return ret
 
 
 def parse_stop(stop):
@@ -425,7 +452,7 @@ def parse_stop(stop):
     speed = None
     m = re.search(r'A(\d+)', stop)
     if m:
-        altitude = int(m.groups()[0])
+        altitude = int(m.groups()[0]) * 100
     m = re.search(r'N(\d+)', stop)
     if m:
         speed = int(m.groups()[0])
@@ -449,24 +476,156 @@ RoutePart = namedtuple(
 
 
 def cmd_route(args):
-    departure_time = parse_time(args.departure_time)
+    # TODO: read perf information from json file
+    # departure_time = parse_time(args.departure_time)
 
-    try:
-        offset = offset_from_time(departure_time)
-    except ValueError as e:
-        print(str(e))
-        return False
+    # try:
+        # offset = offset_from_time(departure_time)
+    # except ValueError as e:
+        # print(str(e))
+        # return False
 
-    winds = get_all_winds(offset)
-    print(winds)
+    # winds = get_all_winds(offset)
+    # print(winds)
 
     stops = [Stop(args.departure.upper(), altitude=0, speed=0)]
     stops.extend([parse_stop(stop.upper()) for stop in args.route])
     stops.append(Stop(args.destination.upper(), altitude=0, speed=0))
 
-    print(stops)
+    airports = get_airports()
+    rows = []
+    for stop in stops:
+        if 'VP' in stop.location:
+            pos = get_waypoint(stop.location)
+            stop.latitude = pos['latitude']
+            stop.longitude = pos['longitude']
+            continue
+
+        if stop.location not in airports:
+            print('unknown stop {}'.format(stop.location), file=sys.stderr)
+            continue
+
+        data = airports[stop.location]
+        stop.latitude = data['latitude']
+        stop.longitude = data['longitude']
+        rows.append([
+            stop.location,
+            stop.altitude,
+            stop.speed,
+        ])
+    print(
+        tabulate(
+            rows,
+            headers=['location', 'altitude', 'speed'],
+        ),
+        file=sys.stderr,
+    )
+
+    parts = []
+    rows = []
+    for i in range(1, len(stops)):
+        prev = stops[i - 1]
+        cur = stops[i]
+        distance = distance_between_points(
+            prev.latitude,
+            prev.longitude,
+            cur.latitude,
+            cur.longitude,
+        )
+        bearing = bearing_between_points(
+            prev.latitude,
+            prev.longitude,
+            cur.latitude,
+            cur.longitude,
+        )
+        if cur.altitude > prev.altitude:
+            attitude = 'climb'
+        elif cur.altitude < prev.altitude:
+            attitude = 'descend'
+        else:
+            attitude = 'level'
+
+        if cur.speed:
+            speed = cur.speed
+        else:
+            if attitude == 'climb':
+                if prev.altitude == 0:
+                    speed = args.vy_climb_speed
+                else:
+                    speed = args.cruise_climb_speed
+            else:
+                speed = args.cruise_speed
+
+        parts.append(
+            RoutePart(
+                cur.altitude,
+                attitude,
+                None,
+                speed,
+                bearing,  # TODO: calculate magnetic heading
+                distance,
+                None,  # TODO: calculate groundspeed
+                None,  # TODO: calculate ETE
+                None,  # TODO: calculate fuel
+            ),
+        )
+        rows.append([
+            cur.altitude,
+            attitude,
+            speed,
+            bearing,
+            distance,
+        ])
+
+    print(
+        tabulate(
+            rows,
+            headers=['altitude', 'attitude', 'tas', 'bearing', 'distance'],
+        ),
+        file=sys.stderr,
+    )
 
     return True
+
+
+def get_waypoint(waypoint):
+    URL = 'https://nfdc.faa.gov/nfdcApps/services/ajv5/fix_search.jsp'
+    soup = BeautifulSoup(
+        requests.get(URL, params={'keyword': waypoint}).text,
+        'html.parser',
+    )
+    lat = False
+    lon = False
+    point = {}
+    for td in soup.find('table').find_all('td'):
+        if 'Latitude:' in td.text:
+            lat = True
+            continue
+        if lat:
+            text = td.text.strip()
+            parts = text.split(' ')
+            lat_parts = parts[0].split('-')
+            point['latitude'] = int(lat_parts[0]) + float(lat_parts[1]) / 60
+            point['latitude'] += float(lat_parts[2]) / 3600
+            if text[-1] == 'S':
+                point['latitude'] = -point['latitude']
+            lat = False
+            continue
+
+        if 'Longitude:' in td.text:
+            lon = True
+            continue
+        if lon:
+            text = td.text.strip()
+            parts = text.split(' ')
+            lon_parts = parts[0].split('-')
+            point['longitude'] = int(lon_parts[0]) + float(lon_parts[1]) / 60
+            point['longitude'] += float(lon_parts[2]) / 3600
+            if text[-1] == 'W':
+                point['longitude'] = -point['longitude']
+            lon = False
+            continue
+    return point
 
 
 def get_airports():
@@ -478,15 +637,17 @@ def get_airports():
     airports = {}
     for line in lines[1:]:
         data = dict(zip(headers, line.strip().split('\t')))
-        if 'IcaoIdentifier' not in data:
-            continue
+        if data.get('IcaoIdentifier', None):
+            ident = data['IcaoIdentifier']
+        else:
+            ident = data['LocationID'][1:]
         data['latitude'] = float(data['ARPLatitudeS'][:-1]) / 3600
         if data['ARPLatitudeS'][-1] == 'S':
             data['latitude'] = -data['latitude']
         data['longitude'] = float(data['ARPLongitudeS'][:-1]) / 3600
         if data['ARPLongitudeS'][-1] == 'W':
             data['longitude'] = -data['longitude']
-        airports[data['IcaoIdentifier']] = data
+        airports[ident] = data
 
     return airports
 
@@ -520,13 +681,7 @@ def bearing_between_points(lat1, lon1, lat2, lon2):
 
 def cmd_airport_info(args):
     airports = get_airports()
-    # print(airports[args.airport.upper()])
-
-    pao = airports['KPAO']
-    oak = airports['KOAK']
-
-    print(distance_between_points(pao['latitude'], pao['longitude'], oak['latitude'], oak['longitude']))
-    print(bearing_between_points(pao['latitude'], pao['longitude'], oak['latitude'], oak['longitude']))
+    print(airports[args.airport.upper()])
 
     return True
 
