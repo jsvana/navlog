@@ -510,6 +510,21 @@ def format_winds(winds):
     return ret
 
 
+def temperature_from_metar(station):
+    URL = 'http://tgftp.nws.noaa.gov/data/observations/metar/stations/{}.TXT'
+    body = requests.get(URL.format(station.upper())).text
+    m = re.search(r'\b(M?\d+/M?\d+)\b', body.split('\n')[1])
+    if m is None:
+        raise RuntimeError(
+            'Unable to get METAR for {}'.format(station.upper()),
+        )
+
+    temperature_str, dewpoint_str = m.group(0).split('/')
+    if temperature_str[0] == 'M':
+        return -int(temperature_str[1:])
+    return int(temperature_str)
+
+
 def cmd_route(args):
     departure_time = parse_time(args.departure_time)
 
@@ -598,6 +613,16 @@ def cmd_route(args):
             cur.altitude,
             winds_aloft,
         )
+
+        if 'temperature' not in selected_winds:
+            for location in [cur.location, prev.location]:
+                try:
+                    selected_winds['temperature'] = temperature_from_metar(
+                        location,
+                    )
+                    break
+                except Exception:
+                    pass
 
         part_winds.declination = declination(
             abs(cur.latitude - prev.latitude) / 2,
