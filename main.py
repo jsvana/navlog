@@ -9,6 +9,7 @@ import math
 from pathlib import Path
 import re
 import sys
+from xml.etree import ElementTree
 
 
 from bs4 import BeautifulSoup
@@ -71,6 +72,22 @@ def parse_args():
         help='Time to fetch winds for (2017-11-20 1620PST',
     )
     winds_parser.set_defaults(cmd=cmd_winds)
+
+    declination_parser = subparsers.add_parser(
+        'declination',
+        help='Get declination for a given point',
+    )
+    declination_parser.add_argument(
+        'latitude',
+        type=float,
+        help='Latitude of position',
+    )
+    declination_parser.add_argument(
+        'longitude',
+        type=float,
+        help='Longitude of position',
+    )
+    declination_parser.set_defaults(cmd=cmd_declination)
 
     return parser.parse_args()
 
@@ -314,6 +331,22 @@ def cmd_winds(args):
             headers=['altitude', 'direction', 'velocity', 'temperature'],
         ),
     )
+
+    return True
+
+
+def cmd_declination(args):
+    URL = (
+        'http://www.ngdc.noaa.gov/geomag-web/calculators/calculateDeclination'
+    )
+    params = {
+        'lat1': args.latitude,
+        'lon1': args.longitude,
+        'resultFormat': 'xml',
+        'startMonth': datetime.datetime.now().month,
+    }
+    tree = ElementTree.fromstring(requests.get(URL, params=params).text)
+    print(float(tree.find('result/declination').text))
 
     return True
 
