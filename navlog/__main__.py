@@ -554,6 +554,29 @@ def nearest_winds_aloft(airport_keys, latitude, longitude):
     return key
 
 
+def skyvector_link(route):
+    lat_sum = 0
+    lon_sum = 0
+    route_str = ''
+    for stop in route:
+        lat_sum += stop.latitude
+        lon_sum += stop.longitude
+        route_str += '%20' + stop.location
+        extra_info = ''
+        if stop.altitude:
+            extra_info += 'A{}'.format(int(stop.altitude / 100))
+        if stop.speed:
+            extra_info += 'N{}'.format(int(stop.speed))
+        if extra_info:
+            route_str += '/' + extra_info
+
+    return 'https://skyvector.com/?ll={},{}&chart=301&fpl={}'.format(
+        lat_sum / len(route),
+        lon_sum / len(route),
+        route_str,
+    )
+
+
 def cmd_route(args):
     departure_time = parse_time(args.departure_time)
 
@@ -750,6 +773,8 @@ def cmd_route(args):
             math.ceil(total_fuel),
         ),
     )
+
+    print(skyvector_link(stops))
 
     return True
 
