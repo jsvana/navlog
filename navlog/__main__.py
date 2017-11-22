@@ -120,11 +120,6 @@ def parse_args():
         'departure_time',
         help='Time of departure',
     )
-    # TODO: calculate this automatically
-    route_parser.add_argument(
-        'winds_airport',
-        help='Airport to get winds aloft data from',
-    )
     route_parser.add_argument(
         'route',
         nargs='*',
