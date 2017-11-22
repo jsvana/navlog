@@ -127,16 +127,6 @@ def parse_args():
     )
     route_parser.set_defaults(cmd=cmd_route)
 
-    airport_parser = subparsers.add_parser(
-        'airport-info',
-        help='Build a navlog for a given airport',
-    )
-    airport_parser.add_argument(
-        'airport',
-        help='Airport code to get information for',
-    )
-    airport_parser.set_defaults(cmd=cmd_airport_info)
-
     return parser.parse_args()
 
 
@@ -590,7 +580,6 @@ def cmd_route(args):
     stops.extend([parse_stop(stop.upper()) for stop in args.route])
     stops.append(Stop(args.destination.upper(), altitude=0, speed=0))
 
-    airports = get_airports()
     rows = []
     for stop in stops:
         if 'VP' in stop.location:
@@ -599,13 +588,12 @@ def cmd_route(args):
             stop.longitude = pos['longitude']
             continue
 
-        if stop.location not in airports:
-            print('unknown stop {}'.format(stop.location))
-            continue
+        airport_pos = get_airport_location(stop.location)
+        if airport_pos is None:
+            print('Unknown stop {}'.format(stop.location))
+            return False
 
-        data = airports[stop.location]
-        stop.latitude = data['latitude']
-        stop.longitude = data['longitude']
+        stop.latitude, stop.longitude = airport_pos
         rows.append([
             stop.location,
             stop.altitude,
@@ -814,28 +802,24 @@ def get_waypoint(waypoint):
     return point
 
 
-def get_airports():
-    path = Path('NfdcFacilities.xls')
-    with path.open('r') as f:
-        lines = f.readlines()
-
-    headers = [h.replace('"', '') for h in lines[0].strip().split('\t')]
-    airports = {}
-    for line in lines[1:]:
-        data = dict(zip(headers, line.strip().split('\t')))
-        if data.get('IcaoIdentifier', None):
-            ident = data['IcaoIdentifier']
-        else:
-            ident = data['LocationID'][1:]
-        data['latitude'] = float(data['ARPLatitudeS'][:-1]) / 3600
-        if data['ARPLatitudeS'][-1] == 'S':
-            data['latitude'] = -data['latitude']
-        data['longitude'] = float(data['ARPLongitudeS'][:-1]) / 3600
-        if data['ARPLongitudeS'][-1] == 'W':
-            data['longitude'] = -data['longitude']
-        airports[ident] = data
-
-    return airports
+def get_airport_location(identifier):
+    sql = (
+        'SELECT ST_X(point) AS longitude, ST_Y(point) AS latitude '
+        'FROM airports_airport WHERE location_identifier = %s '
+        'OR icao_identifier = %s'
+    )
+    conn = psycopg2.connect(
+        host=config.postgres['host'],
+        port=config.postgres['port'],
+        database=config.postgres['database'],
+        user=config.postgres['username'],
+        password=config.postgres['password'],
+    )
+    cur = conn.cursor()
+    cur.execute(sql, [identifier, identifier])
+    ret = cur.fetchone()
+    conn.close()
+    return ret
 
 
 def distance_between_points(lat1, lon1, lat2, lon2):
@@ -863,13 +847,6 @@ def bearing_between_points(lat1, lon1, lat2, lon2):
     )
     bearing = math.degrees(bearing)
     return (bearing + 360) % 360
-
-
-def cmd_airport_info(args):
-    airports = get_airports()
-    print(airports[args.airport.upper()])
-
-    return True
 
 
 def main():
